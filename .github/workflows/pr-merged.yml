@@ -1,181 +1,98 @@
 name: PR Merged
-
-on:
+'on':
   pull_request_target:
-    types: [closed]
-
+    types:
+    - closed
 permissions:
   contents: read
-
 defaults:
   run:
     shell: bash
-
 jobs:
   merged:
     name: Show info
     if: github.event.pull_request.merged == true
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     steps:
-      # github.event.pull_request.base may not refer to the _actual_ parent commit of the PR,
-      # instead it is the commit that the PR was merged/rebased onto.
-      #
-      # Since we want to diff the PR's commits, query the first commit's first parent.
-      #
-      # Alternatively, we could compare
-      # github.event.pull_request.merge_commit_sha to github.event.pull_request.base.sha,
-      # however I'm unsure how that'll interact with grouped Merge Queue 🤔
-      - name: Get base commit
-        id: base
-        env:
-          GH_TOKEN: ${{ github.token }}
-          owner: ${{ github.repository_owner }}
-          repo: ${{ github.event.repository.name }}
-          pr: ${{ github.event.pull_request.number }}
-        run: |
-          out=$(mktemp)
-          gh api graphql -F owner="$owner" -F repo="$repo" -F pr="$pr" -f query='
-              query($owner: String!, $repo: String!, $pr: Int!) {
-                repository(owner: $owner, name: $repo) {
-                  pullRequest(number: $pr) {
-                    commits(first: 1) {
-                      edges {
-                        node {
-                          commit {
-                            parents(first: 1) {
-                              edges {
-                                node {
-                                  oid
-                                }
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-              ' --jq '
-                .data
-                .repository
-                .pullRequest
-                .commits
-                .edges[0]
-                .node
-                .commit
-                .parents
-                .edges[0]
-                .node
-                .oid
-              ' > "$out"
-          echo "sha=$(cat "$out")" >> "$GITHUB_OUTPUT"
+    - name: Get base commit
+      id: base
+      env:
+        GH_TOKEN: ${{ github.token }}
+        owner: ${{ github.repository_owner }}
+        repo: ${{ github.event.repository.name }}
+        pr: ${{ github.event.pull_request.number }}
+      run: "out=$(mktemp)\ngh api graphql -F owner=\"$owner\" -F repo=\"$repo\" -F\
+        \ pr=\"$pr\" -f query='\n    query($owner: String!, $repo: String!, $pr: Int!)\
+        \ {\n      repository(owner: $owner, name: $repo) {\n        pullRequest(number:\
+        \ $pr) {\n          commits(first: 1) {\n            edges {\n           \
+        \   node {\n                commit {\n                  parents(first: 1)\
+        \ {\n                    edges {\n                      node {\n         \
+        \               oid\n                      }\n                    }\n    \
+        \              }\n                }\n              }\n            }\n    \
+        \      }\n        }\n      }\n    }\n    ' --jq '\n      .data\n      .repository\n\
+        \      .pullRequest\n      .commits\n      .edges[0]\n      .node\n      .commit\n\
+        \      .parents\n      .edges[0]\n      .node\n      .oid\n    ' > \"$out\"\
+        \necho \"sha=$(cat \"$out\")\" >> \"$GITHUB_OUTPUT\"\n"
+    - name: Checkout base branch
+      id: checkout
+      uses: actions/checkout@v6
+      with:
+        sparse-checkout: 'flake/dev/diff-plugins.py
 
-      # Checkout CI scripts from the latest commit from the base branch.
-      # This ensures we get the latest scripts, even if the PR's base was outdated.
-      - name: Checkout base branch
-        id: checkout
-        uses: actions/checkout@v6
-        with:
-          sparse-checkout: |
-            flake/dev/diff-plugins.py
-            flake.lock
-          sparse-checkout-cone-mode: false
+          flake.lock
 
-      - name: Get nixpkgs
-        id: nixpkgs
-        run: |
-          jq --raw-output --exit-status '
-            .nodes[.nodes[.root].inputs.nixpkgs].locked
-            | "https://github.com/\(.owner)/\(.repo)/archive/\(.rev).tar.gz"
-            | "url=\(.)"
-          ' flake.lock >> "$GITHUB_OUTPUT"
+          '
+        sparse-checkout-cone-mode: false
+    - name: Get nixpkgs
+      id: nixpkgs
+      run: "jq --raw-output --exit-status '\n  .nodes[.nodes[.root].inputs.nixpkgs].locked\n\
+        \  | \"https://github.com/\\(.owner)/\\(.repo)/archive/\\(.rev).tar.gz\"\n\
+        \  | \"url=\\(.)\"\n' flake.lock >> \"$GITHUB_OUTPUT\"\n"
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
+      with:
+        nix_path: nixpkgs=${{ steps.nixpkgs.outputs.url }}
+        extra_nix_config: 'accept-flake-config = true
 
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
-        with:
-          nix_path: nixpkgs=${{ steps.nixpkgs.outputs.url }}
-          extra_nix_config: |
-            accept-flake-config = true
-
-      # NOTE: This is here for debugging and gathering data
-      # TODO: Remove
-      - name: Print metadata
-        env:
-          checked_out: ${{ steps.checkout.outputs.commit }}
-          workflow_base: ${{ github.base_ref }}
-          workflow_head: ${{ github.head_ref }}
-          parent: ${{ steps.base.outputs.sha }}
-          base: ${{ github.event.pull_request.base.sha }}
-          head: ${{ github.event.pull_request.head.sha }}
-          merge: ${{ github.event.pull_request.merge_commit_sha }}
-          pull_request: ${{ toJSON(github.event.pull_request) }}
-        run: |
-          {
-            echo '## Commits'
-            echo
-            echo "Checked out: $checked_out"
-            echo "Workflow base: $workflow_base"
-            echo "Workflow head: $workflow_head"
-            echo "PR parent: $parent"
-            echo "Base: $base"
-            echo "Head: $head"
-            echo "Merge: $merge"
-            echo
-            echo '<details><summary><code>pull_request</code> details</summary>'
-            echo
-            echo '```json'
-            echo "$pull_request" | jq .
-            echo '```'
-            echo
-            echo '</details>'
-            echo
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Compare parent -> head
-        id: diff1
-        env:
-          base: ${{ steps.base.outputs.sha }}
-          head: ${{ github.event.pull_request.head.sha }}
-        run: |
-          out=$(mktemp)
-          ./flake/dev/diff-plugins.py --compact "$base" "$head" > "$out"
-          {
-            echo -n 'json='
-            jq -c . < "$out"
-          } >> "$GITHUB_OUTPUT"
-          jq . < "$out"
-
-      - name: Compare base -> merge
-        id: diff2
-        env:
-          base: ${{ github.event.pull_request.base.sha }}
-          head: ${{ github.event.pull_request.merge_commit_sha }}
-        run: |
-          out=$(mktemp)
-          ./flake/dev/diff-plugins.py --compact "$base" "$head" > "$out"
-          {
-            echo -n 'json='
-            jq -c . < "$out"
-          } >> "$GITHUB_OUTPUT"
-          jq . < "$out"
-
-      - name: Print summary
-        env:
-          json1: ${{ steps.diff1.outputs.json }}
-          json2: ${{ steps.diff2.outputs.json }}
-        run: |
-          {
-            echo '## JSON plugin diff: parent -> head'
-            echo
-            echo '```json'
-            echo "$json1" | jq .
-            echo '```'
-            echo
-            echo '## JSON plugin diff: base -> merge'
-            echo
-            echo '```json'
-            echo "$json2" | jq .
-            echo '```'
-            echo
-          } >> "$GITHUB_STEP_SUMMARY"
+          '
+    - name: Print metadata
+      env:
+        checked_out: ${{ steps.checkout.outputs.commit }}
+        workflow_base: ${{ github.base_ref }}
+        workflow_head: ${{ github.head_ref }}
+        parent: ${{ steps.base.outputs.sha }}
+        base: ${{ github.event.pull_request.base.sha }}
+        head: ${{ github.event.pull_request.head.sha }}
+        merge: ${{ github.event.pull_request.merge_commit_sha }}
+        pull_request: ${{ toJSON(github.event.pull_request) }}
+      run: "{\n  echo '## Commits'\n  echo\n  echo \"Checked out: $checked_out\"\n\
+        \  echo \"Workflow base: $workflow_base\"\n  echo \"Workflow head: $workflow_head\"\
+        \n  echo \"PR parent: $parent\"\n  echo \"Base: $base\"\n  echo \"Head: $head\"\
+        \n  echo \"Merge: $merge\"\n  echo\n  echo '<details><summary><code>pull_request</code>\
+        \ details</summary>'\n  echo\n  echo '```json'\n  echo \"$pull_request\" |\
+        \ jq .\n  echo '```'\n  echo\n  echo '</details>'\n  echo\n} >> \"$GITHUB_STEP_SUMMARY\"\
+        \n"
+    - name: Compare parent -> head
+      id: diff1
+      env:
+        base: ${{ steps.base.outputs.sha }}
+        head: ${{ github.event.pull_request.head.sha }}
+      run: "out=$(mktemp)\n./flake/dev/diff-plugins.py --compact \"$base\" \"$head\"\
+        \ > \"$out\"\n{\n  echo -n 'json='\n  jq -c . < \"$out\"\n} >> \"$GITHUB_OUTPUT\"\
+        \njq . < \"$out\"\n"
+    - name: Compare base -> merge
+      id: diff2
+      env:
+        base: ${{ github.event.pull_request.base.sha }}
+        head: ${{ github.event.pull_request.merge_commit_sha }}
+      run: "out=$(mktemp)\n./flake/dev/diff-plugins.py --compact \"$base\" \"$head\"\
+        \ > \"$out\"\n{\n  echo -n 'json='\n  jq -c . < \"$out\"\n} >> \"$GITHUB_OUTPUT\"\
+        \njq . < \"$out\"\n"
+    - name: Print summary
+      env:
+        json1: ${{ steps.diff1.outputs.json }}
+        json2: ${{ steps.diff2.outputs.json }}
+      run: "{\n  echo '## JSON plugin diff: parent -> head'\n  echo\n  echo '```json'\n\
+        \  echo \"$json1\" | jq .\n  echo '```'\n  echo\n  echo '## JSON plugin diff:\
+        \ base -> merge'\n  echo\n  echo '```json'\n  echo \"$json2\" | jq .\n  echo\
+        \ '```'\n  echo\n} >> \"$GITHUB_STEP_SUMMARY\"\n"
